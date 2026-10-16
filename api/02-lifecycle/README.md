@@ -72,6 +72,23 @@ curl -s $CURL -X PUT "$SERVER/apis/subresources.kubevirt.io/v1/namespaces/$NS/vi
 curl -s $CURL -X PUT "$SERVER/apis/subresources.kubevirt.io/v1/namespaces/$NS/virtualmachines/$VM/restart"
 ```
 
+### Validated on OCP 4.22 / CNV 4.22.12
+
+The `spec.running` field is **deprecated** and rejected by admission when the VM
+already has a `runStrategy` set (the common case for MTV-imported or
+operator-managed VMs). The working pattern on a live cluster:
+
+```bash
+# Start
+oc patch vm $VM -n $NS --type merge -p '{"spec":{"runStrategy":"Always"}}'
+# Stop
+oc patch vm $VM -n $NS --type merge -p '{"spec":{"runStrategy":"Halted"}}'
+# Restart = stop, wait for VMI to disappear, then start
+```
+
+`spec.running` only works when `runStrategy` is `Manual`. For VMs that already
+carry a `runStrategy`, the patch above is the reliable path.
+
 ### runStrategy vs running
 
 These are **mutually exclusive**. `spec.running` is ignored on a VM whose

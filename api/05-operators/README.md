@@ -123,6 +123,23 @@ supported and consistent.
 | `newSMBiosSerial` | Override the generated serial |
 | `patches` | JSON patches applied to the target VM |
 
+> **Validated on OCP 4.22 — two limitations:**
+>
+> 1. **Same namespace only.** The source and target VMs must be in the same
+>    namespace as the `VirtualMachineClone` object. A cross-namespace reference
+>    fails with `Source doesnt exist: VirtualMachine <ns>/<name>` because the
+>    controller resolves the source relative to the clone's own namespace.
+>
+> 2. **Requires working VolumeSnapshots.** The clone flow snapshots the source
+>    PVCs first. If the storage class's CSI driver does not support (or has
+>    broken) `VolumeSnapshot` — for example some NFS CSI configurations — the
+>    snapshot never reaches `readyToUse`, and the clone fails after the default
+>    5-minute deadline with `snapshot deadline exceeded`. Verify with:
+>    ```bash
+>    oc get volumesnapshotclass -o name   # must exist for your storage class
+>    ```
+
+
 ---
 
 ## Snapshots and restore
@@ -191,6 +208,35 @@ for s in json.load(sys.stdin)['items']:
     print(f\"{s['metadata']['name']:22} clone={st.get('cloneStrategy','-'):10} snapclass={st.get('snapshotClass','-')}\")
 "
 ```
+
+> **NFS CSI caveat (validated on OCP 4.22).** Some NFS CSI driver configurations
+> advertise a `VolumeSnapshotClass` but never make the snapshot
+> `readyToUse` — the `VolumeSnapshotContent` gets stuck and the snapshot fails
+> after the deadline with `snapshot deadline exceeded`. If your storage class is
+> NFS-backed, test a snapshot on a small PVC before relying on this for VM
+> backup:
+> ```bash
+> # quick smoke test
+> oc apply -f - <<'YAML'
+> apiVersion: v1
+> kind: PersistentVolumeClaim
+> metadata: {name: snap-test, namespace: $NS}
+> spec:
+>   accessModes: [ReadWriteMany]
+>   storageClassName: nfs-csi
+>   resources: {requests: {storage: 1Gi}}
+> YAML
+> oc apply -f - <<YAML
+> apiVersion: snapshot.storage.k8s.io/v1
+> kind: VolumeSnapshot
+> metadata: {name: snap-test-snap, namespace: $NS}
+> spec:
+>   source: {persistentVolumeClaimName: snap-test}
+> YAML
+> oc get volumesnapshot snap-test-snap -n $NS -o jsonpath='{.status.readyToUse}'
+> # wait up to 5 min; if it never says "true", snapshots are broken for this SC
+> ```
+
 
 ### Lifecycle independence
 

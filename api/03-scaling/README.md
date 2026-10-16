@@ -102,6 +102,13 @@ Guest support for `virtio-mem`:
 | Other Linux | kernel ≥ 5.16 with the `virtio-mem` module |
 | Windows | virtio-win ≥ `100.95.104.26200` |
 
+> **Windows caveat (validated on OCP 4.22).** vCPU and RAM hot-plug changes are
+> accepted by the API but do **not** take effect on a running Windows VMI without
+> a restart. The patch updates the VM spec, the VMI keeps its original values,
+> and a `RestartRequired` condition is raised. RHEL 9 applies both live. This is
+> a guest-OS driver limitation (virtio-mem / CPU hotplug in the Windows image),
+> not a KubeVirt one.
+
 Memory hot-**un**plug is more restricted than hot-plug — decreasing often needs a
 restart even when increasing does not.
 
@@ -173,6 +180,14 @@ curl -s $CURL -X PATCH \
 
 Use **JSON patch** here, not merge patch — `volumes` and `disks` are lists, and a
 merge patch would replace the whole list and detach your OS disk.
+
+> **Merge-patch pitfall (validated on OCP 4.22).** A `--type merge` patch on
+> `spec.template.spec.volumes` or `.disks` **replaces the entire array** rather
+> than appending. If you omit the existing OS disk from the patch, it is
+> dropped and the VM will not boot. Use a **JSON patch** with `op:add` and
+> `path:/.../-` to append (as shown above), or use the `addvolume` subresource
+> for live hot-plug.
+
 
 ### Create the disk first
 
@@ -249,6 +264,13 @@ YAML
 
 There is **no hot-plug for network interfaces** in OCP 4.22. Patch the spec and
 restart.
+
+> **Pod-network limitation (validated on OCP 4.22).** A VM can have at most
+> **one** interface connected to the pod network (`pod: {}`). Admission rejects
+> a second one with `more than one interface is connected to a pod network`.
+> Masquerade also requires the pod network, so it cannot be used as a workaround.
+> A real second NIC needs **Multus** and a `NetworkAttachmentDefinition` (NAD),
+> as shown in the attach example below.
 
 ### Attach
 
