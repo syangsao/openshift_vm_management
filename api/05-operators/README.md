@@ -131,13 +131,13 @@ supported and consistent.
 >    controller resolves the source relative to the clone's own namespace.
 >
 > 2. **Requires working VolumeSnapshots.** The clone flow snapshots the source
->    PVCs first. If the storage class's CSI driver does not support (or has
->    broken) `VolumeSnapshot` — for example some NFS CSI configurations — the
->    snapshot never reaches `readyToUse`, and the clone fails after the default
->    5-minute deadline with `snapshot deadline exceeded`. Verify with:
->    ```bash
->    oc get volumesnapshotclass -o name   # must exist for your storage class
->    ```
+>    PVCs first. If the snapshot never reaches `readyToUse`, the clone fails after
+>    the deadline with `snapshot deadline exceeded`. There are two common causes,
+>    both covered under [Snapshots and restore](#snapshots-and-restore) below:
+>    duplicate snapshot controllers, and the fact that NFS-CSI snapshots are full
+>    volume copies capped at a 20-minute timeout — which large VM disks never
+>    finish. Note that a *snapshot test on a small PVC can pass* while cloning a
+>    real VM disk still fails.
 
 
 ---
@@ -209,14 +209,48 @@ for s in json.load(sys.stdin)['items']:
 "
 ```
 
-> **NFS CSI caveat (validated on OCP 4.22).** Some NFS CSI driver configurations
-> advertise a `VolumeSnapshotClass` but never make the snapshot
-> `readyToUse` — the `VolumeSnapshotContent` gets stuck and the snapshot fails
-> after the deadline with `snapshot deadline exceeded`. If your storage class is
-> NFS-backed, test a snapshot on a small PVC before relying on this for VM
-> backup:
+> **NFS CSI caveats (validated on OCP 4.22).** Two independent problems can make
+> snapshots fail on an NFS-backed storage class. The `StorageProfile` is usually
+> *not* at fault — check it, but expect it to be correct.
+>
+> **1. Duplicate snapshot controllers.** OpenShift already runs a cluster-wide
+> `snapshot-controller` in `openshift-cluster-storage-operator`. The
+> `csi-driver-nfs` Helm chart can optionally deploy a **second** one in its own
+> namespace. Both elect a leader using a Lease named `snapshot-controller-leader`,
+> but leases are namespaced, so neither sees the other and **both act as
+> leader**. They then race on the same `VolumeSnapshot`/PVC objects:
+>
+> ```
+> Operation cannot be fulfilled on persistentvolumeclaims "…": the object has been modified
+> Operation cannot be fulfilled on volumesnapshots…: the object has been modified
+> ```
+>
+> The snapshot never stabilises, so it fails after the deadline with
+> `snapshot deadline exceeded`. Diagnose and fix:
 > ```bash
-> # quick smoke test
+> # both leases exist, in different namespaces, each with a live holder?
+> oc get lease -A | grep snapshot-controller-leader
+>
+> # disable the chart's duplicate (permanent fix: externalSnapshotter.enabled=false)
+> oc scale deploy snapshot-controller -n csi-driver-nfs --replicas=0
+> ```
+> Disabling it does **not** remove the driver's `csi-snapshotter` sidecar — that
+> is gated separately by `controller.enableSnapshotter`.
+>
+> **2. Snapshots are full copies, with a 20-minute deadline.** The NFS CSI driver
+> does not do copy-on-write; it tars the whole volume
+> (`controllerserver.go: tar /tmp/pvc-… -> …tar.gz`). The sidecar's
+> `--timeout=1200s` caps each attempt at 20 minutes, and a retry re-copies from
+> scratch. A 1Gi volume snapshots in seconds; a 106Gi VM disk cannot finish in
+> time and fails with `DeadlineExceeded`. Compression is on by default, which
+> makes it slower still.
+>
+> So NFS-CSI snapshots are workable for small volumes and **not** suitable for
+> large VM disks — regardless of the controller fix. For VM-level backups on NFS,
+> export the disk, or use storage with real snapshot support.
+>
+> Quick smoke test before relying on snapshots:
+> ```bash
 > oc apply -f - <<'YAML'
 > apiVersion: v1
 > kind: PersistentVolumeClaim
@@ -231,10 +265,11 @@ for s in json.load(sys.stdin)['items']:
 > kind: VolumeSnapshot
 > metadata: {name: snap-test-snap, namespace: $NS}
 > spec:
+>   volumeSnapshotClassName: csi-nfs-snapclass
 >   source: {persistentVolumeClaimName: snap-test}
 > YAML
-> oc get volumesnapshot snap-test-snap -n $NS -o jsonpath='{.status.readyToUse}'
-> # wait up to 5 min; if it never says "true", snapshots are broken for this SC
+> oc get volumesnapshot snap-test-snap -n $NS -o jsonpath='{.status.readyToUse}{"\n"}'
+> # "true" within seconds = working. Still false after 5 min = see (1) above.
 > ```
 
 
