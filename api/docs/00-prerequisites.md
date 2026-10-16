@@ -94,17 +94,17 @@ oc adm policy add-role-to-user kubevirt.io:edit <user> -n vms
 CI/automation service accounts need the same, plus CDI permissions if they
 create DataVolumes.
 
-## Store your cluster values
+## Shell variables used throughout
 
-Copy the template and fill it in — the helper scripts source it:
-
-```bash
-cp .cluster-vars.example .cluster-vars   # .cluster-vars is gitignored
-```
+Every example in this repository assumes a few variables rather than hard-coded
+values. Set them once per shell session:
 
 ```bash
-# .cluster-vars
-export NAMESPACE=vms
-export STORAGE_CLASS=nfs-csi
-export CLUSTER_DOMAIN=$(oc get ingress.config cluster -o jsonpath='{.spec.domain}')
+export NS=vms                  # namespace holding your VMs
+export VM=web-01               # the VM you are operating on
+export SERVER=$(oc whoami --show-server)
+export STORAGE_CLASS=nfs-csi   # discover with: oc get storageclass
 ```
+
+For the raw REST examples you also need credentials — see
+[`04-rest-api.md`](04-rest-api.md).

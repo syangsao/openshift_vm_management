@@ -1,7 +1,6 @@
 # Local overrides - never commit cluster-specific values
 .env
 *.local.yaml
-.cluster-vars
 
 # Extracted kubeconfig credentials
 *.crt
