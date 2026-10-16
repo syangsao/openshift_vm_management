@@ -240,10 +240,13 @@ for s in json.load(sys.stdin)['items']:
 > **2. Snapshots are full copies, with a 20-minute deadline.** The NFS CSI driver
 > does not do copy-on-write; it tars the whole volume
 > (`controllerserver.go: tar /tmp/pvc-… -> …tar.gz`). The sidecar's
-> `--timeout=1200s` caps each attempt at 20 minutes, and a retry re-copies from
-> scratch. A 1Gi volume snapshots in seconds; a 106Gi VM disk cannot finish in
-> time and fails with `DeadlineExceeded`. Compression is on by default, which
-> makes it slower still.
+> `--timeout=1200s` caps each attempt at **20 minutes**, and a retry re-copies
+> from scratch. Compression is on by default, which makes it slower still.
+>
+> Measured on a 106Gi VM disk over NFS: ~2.5 GB/min, i.e. **~42 minutes** to
+> copy once — twice the deadline. A 1Gi volume snapshots in seconds and works
+> fine; large VM disks fail with `DeadlineExceeded` (the failure lands at
+> *exactly* +20m, which is how you recognise this).
 >
 > So NFS-CSI snapshots are workable for small volumes and **not** suitable for
 > large VM disks — regardless of the controller fix. For VM-level backups on NFS,
