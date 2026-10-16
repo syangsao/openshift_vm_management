@@ -1,0 +1,128 @@
+# VirtualMachinePool - a replica-set style fleet of identical VMs.
+#
+#   pool.kubevirt.io/v1beta1   (API tier 2)
+#
+# The pool owns its VMs and reconciles toward `replicas`, exactly like a
+# Deployment does for pods. Use it for stateless VM fleets, VDI pools, or any
+# case where you want N interchangeable VMs and automatic replacement.
+#
+#   envsubst < vm-pool.yaml | oc apply -f -
+#
+# Required env vars: NAMESPACE, STORAGE_CLASS
+apiVersion: pool.kubevirt.io/v1beta1
+kind: VirtualMachinePool
+metadata:
+  name: rhel9-fleet
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 3
+
+  # Must match spec.template.metadata.labels, and the pool refuses to adopt
+  # VMs it did not create.
+  selector:
+    matchLabels:
+      app: rhel9-fleet
+
+  # How many VMs may be unavailable (ready condition false) during an update.
+  # Integer or percentage string. Defaults to 100%.
+  maxUnavailable: 1
+
+  # ----------------------------------------------------------------
+  # scaleInStrategy - how the controller picks victims on scale-down
+  #   opportunistic: VMs deleted by other means (user, node failure)
+  #     statePreservation: how to preserve state before removal
+  # ----------------------------------------------------------------
+  #   statePreservation is a STRING enum, not an object:
+  #     Disabled - (default) all state is deleted on scale-in
+  #     Offline  - PVCs are preserved and reused on scale-out
+  #     Online   - PVCs AND memory are preserved (fastest scale-out)
+  scaleInStrategy:
+    opportunistic:
+      statePreservation: Offline
+
+  # ----------------------------------------------------------------
+  # updateStrategy - how the controller rolls out template changes
+  #   opportunistic: update the VirtualMachine only; the VMI picks it up
+  #                  naturally on its next restart (gentler)
+  #   proactive:     update both the VM and the running VMI immediately
+  #                  (forces a restart / migration)
+  # ----------------------------------------------------------------
+  updateStrategy:
+    opportunistic: {}
+
+  # ----------------------------------------------------------------
+  # autohealing - replace VMs that fail to become ready
+  # ----------------------------------------------------------------
+  autohealing:
+    minFailingToStartDuration: 5m
+
+  # Naming of generated VMs
+  nameGeneration:
+    appendIndexToConfigMapRefs: true
+    appendIndexToSecretRefs: true
+
+  # NOTE: the field is `virtualMachineTemplate`, NOT `template`.
+  # `selector` and `virtualMachineTemplate` are both required.
+  virtualMachineTemplate:
+    metadata:
+      labels:
+        app: rhel9-fleet
+    spec:
+      runStrategy: Always
+      dataVolumeTemplates:
+        - metadata:
+            name: rhel9-fleet-root
+          spec:
+            sourceRef:
+              kind: DataSource
+              name: rhel9
+              namespace: openshift-virtualization-os-images
+            storage:
+              resources:
+                requests:
+                  storage: 30Gi
+              storageClassName: ${STORAGE_CLASS}
+      instancetype:
+        kind: VirtualMachineClusterInstancetype
+        name: u1.large
+      preference:
+        kind: VirtualMachineClusterPreference
+        name: rhel.9
+      template:
+        spec:
+          domain:
+            devices:
+              disks:
+                - name: root
+                  disk: {bus: virtio}
+                  bootOrder: 1
+              interfaces:
+                - name: podnet
+                  masquerade: {}
+          networks:
+            - name: podnet
+              pod: {}
+          volumes:
+            - name: root
+              dataVolume:
+                name: rhel9-fleet-root
+          evictionStrategy: LiveMigrate
+
+---
+# Scale via the standard scale subresource.
+#
+#   oc scale virtualmachinepool rhel9-fleet --replicas=5 -n <NAMESPACE>
+#
+# Or directly:
+#
+#   curl -X PUT \
+#     "$SERVER/apis/pool.kubevirt.io/v1beta1/namespaces/<NS>/virtualmachinepools/rhel9-fleet/scale" \
+#     -H 'Content-Type: application/json' \
+#     -d '{"apiVersion":"autoscaling/v1","kind":"Scale",
+#          "metadata":{"name":"rhel9-fleet","namespace":"<NS>"},
+#          "spec":{"replicas":5}}'
+#
+# Pause reconciliation:
+#
+#   oc patch virtualmachinepool rhel9-fleet -n <NS> --type merge \
+#     -p '{"spec":{"paused":true}}'

@@ -1,0 +1,68 @@
+# VirtualMachineExport - get disks and manifests out of the cluster.
+#
+#   export.kubevirt.io/v1beta1   (API tier 2)
+#
+# Creates an export server pod and exposes the volume as a downloadable image
+# (raw / gzip) plus the VirtualMachine manifest, so it can be imported elsewhere.
+#
+#   envsubst < vm-export.yaml | oc apply -f -
+#
+# Required env vars: NAMESPACE
+---
+# Export a running or stopped VM. While running, the disks are snapshotted
+# consistently for the duration of the export.
+apiVersion: export.kubevirt.io/v1beta1
+kind: VirtualMachineExport
+metadata:
+  name: web-01-export
+  namespace: ${NAMESPACE}
+spec:
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: web-01
+  # Auto-delete after this duration. Omit for the server default.
+  ttlDuration: 2h0m0s
+
+---
+# Export a VirtualMachineSnapshot instead - useful for point-in-time copies
+# taken before a deletion.
+apiVersion: export.kubevirt.io/v1beta1
+kind: VirtualMachineExport
+metadata:
+  name: web-01-snapshot-export
+  namespace: ${NAMESPACE}
+spec:
+  source:
+    apiGroup: snapshot.kubevirt.io
+    kind: VirtualMachineSnapshot
+    name: web-01-predelete
+  ttlDuration: 2h0m0s
+
+---
+# Export a bare PVC.
+# Note: exports whose source is a PVC do NOT produce a VirtualMachine manifest.
+apiVersion: export.kubevirt.io/v1beta1
+kind: VirtualMachineExport
+metadata:
+  name: web-01-pvc-export
+  namespace: ${NAMESPACE}
+spec:
+  source:
+    # apiGroup MUST be omitted (or blank) for a PVC source. The API rejects
+    # `apiGroup: v1` with "PVC API group must be missing or blank".
+    kind: PersistentVolumeClaim
+    name: web-01-root
+  ttlDuration: 2h0m0s
+
+---
+# Rate-limit or restrict the export server with a custom token secret.
+# Without tokenSecretRef the controller generates one.
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: web-01-export-token
+#   namespace: ${NAMESPACE}
+# type: Opaque
+# stringData:
+#   token: <random-string>

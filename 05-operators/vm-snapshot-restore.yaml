@@ -1,0 +1,76 @@
+# VirtualMachineSnapshot / VirtualMachineRestore
+#
+#   snapshot.kubevirt.io/v1beta1   (API tier 2)
+#
+# Requires the `Snapshot` feature gate, which is ON by default in 4.22.
+# Also requires a snapshotClass in the StorageProfile of the VM's storage:
+#
+#   oc get storageprofile -o custom-columns=\
+#   NAME:.metadata.name,CLONE:.status.cloneStrategy,SNAPCLASS:.status.snapshotClass
+#
+#   envsubst < vm-snapshot-restore.yaml | oc apply -f -
+#
+# Required env vars: NAMESPACE, VM_NAME, SNAPSHOT_NAME
+---
+# Snapshot a VM. Works while the VM is running - the disk is frozen briefly
+# for consistency.
+apiVersion: snapshot.kubevirt.io/v1beta1
+kind: VirtualMachineSnapshot
+metadata:
+  name: ${SNAPSHOT_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  # Fail the snapshot rather than silently skipping volumes that cannot be
+  # snapshotted. Without this the snapshot can "succeed" with volumes missing.
+  failureDeadline: 10m
+
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: ${VM_NAME}
+
+  # Optional: snapshot only some volumes.
+  # includeVolumes:
+  #   - vol-0
+
+  # Optional: skip volumes that do not need preserving. The cloud-init disk is
+  # regenerated at boot and never needs to be in a snapshot.
+  # excludeVolumes:
+  #   - cloudinitdisk
+
+---
+# Restore from a snapshot. This recreates the VirtualMachine AND its disks.
+# If the VM still exists, the restore replaces its volumes in place.
+apiVersion: snapshot.kubevirt.io/v1beta1
+kind: VirtualMachineRestore
+metadata:
+  name: ${SNAPSHOT_NAME}-restore
+  namespace: ${NAMESPACE}
+spec:
+  target:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: ${VM_NAME}
+  virtualMachineSnapshotName: ${SNAPSHOT_NAME}
+
+  # Optional: restore only some volumes.
+  # restoreVolumes:
+  #   - vol-0
+
+  # Optional: wipe and recreate volumes instead of restoring in place.
+  # Only valid when the VM is stopped.
+  # volumeRestores:
+  #   - volumeName: vol-0
+  #     volumeMode: Block
+
+---
+# Related object: VirtualMachineSnapshotContent holds the actual PVC references
+# the snapshot points at. You rarely create this directly - the snapshot
+# controller does - but it is what you inspect to see what was captured.
+#
+#   oc get vmsnapshotcontent -n <NAMESPACE>
+#   oc get vmsnapshotcontent <name> -n <NAMESPACE> -o jsonpath='{.spec.volumeBackups}' | python3 -m json.tool
+#
+# LIFECYCLE INDEPENDENCE - the point of using snapshots as a safety net:
+#   * deleting a VirtualMachineSnapshot does NOT delete the VM
+#   * deleting the VM does NOT delete the snapshot

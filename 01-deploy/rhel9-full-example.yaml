@@ -1,0 +1,237 @@
+# RHEL 9 VM demonstrating every tunable requested:
+#   subnet/IP, OS disk, data disks, vCPU, RAM, OS version, affinity/anti-affinity
+#
+# Apply with:
+#   envsubst < rhel9-full-example.yaml | oc apply -f -
+#
+# Required env vars: NAMESPACE, STORAGE_CLASS, NAD_NAMESPACE, NAD_NAME, NODE_NAME
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: rhel9-full-example
+  namespace: ${NAMESPACE}
+  labels:
+    app: rhel9-full-example
+    app.kubernetes.io/part-of: vm-examples
+spec:
+  # ------------------------------------------------------------------
+  # Run strategy: Always | Halted | Manual | RerunOnFailure | Once
+  # ------------------------------------------------------------------
+  runStrategy: Always
+
+  # ------------------------------------------------------------------
+  # DISKS
+  #   - OS disk: cloned from the rhel9 boot source (DataSource)
+  #   - Data disk 1: empty 100Gi
+  #   - Data disk 2: preallocated 50Gi for sustained write throughput
+  # DataVolumes here are OWNED BY THE VM and are deleted with it.
+  # ------------------------------------------------------------------
+  dataVolumeTemplates:
+    - metadata:
+        name: rhel9-full-example-root
+      spec:
+        sourceRef:
+          kind: DataSource
+          name: rhel9                                    # OS + version
+          namespace: openshift-virtualization-os-images
+        storage:
+          resources:
+            requests:
+              storage: 30Gi
+          storageClassName: ${STORAGE_CLASS}
+
+    - metadata:
+        name: rhel9-full-example-data01
+      spec:
+        source:
+          blank: {}                                      # empty disk
+        storage:
+          resources:
+            requests:
+              storage: 100Gi
+          storageClassName: ${STORAGE_CLASS}
+          volumeMode: Block                              # faster than Filesystem
+
+    - metadata:
+        name: rhel9-full-example-data02
+      spec:
+        source:
+          blank: {}
+        storage:
+          resources:
+            requests:
+              storage: 50Gi
+          storageClassName: ${STORAGE_CLASS}
+        preallocation: true                              # full write performance
+
+  # ------------------------------------------------------------------
+  # vCPU + RAM
+  #   Preferred: an instance type. These live alongside `preference`
+  #   and override whatever the boot source label suggests.
+  # ------------------------------------------------------------------
+  instancetype:
+    kind: VirtualMachineClusterInstancetype
+    name: u1.xlarge                                     # 4 vCPU / 16 GiB
+  preference:
+    kind: VirtualMachineClusterPreference
+    name: rhel.9                                        # OS and version
+
+  template:
+    metadata:
+      labels:
+        app: rhel9-full-example
+    spec:
+      # ----------------------------------------------------------------
+      # AFFINITY
+      # ----------------------------------------------------------------
+      # Simple placement: pin to one compute server.
+      nodeSelector:
+        kubernetes.io/hostname: ${NODE_NAME}
+
+      affinity:
+        # Expressive node placement. Uncomment to use instead of nodeSelector.
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/worker
+                    operator: Exists
+
+        # Keep two instances of this VM on DIFFERENT nodes.
+        # requiredDuringScheduling is a hard rule - with fewer eligible nodes
+        # than replicas, the extra VMs stay Pending. Prefer `preferred…`
+        # unless you truly need the guarantee.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values: ["rhel9-full-example"]
+                topologyKey: kubernetes.io/hostname
+
+      # ----------------------------------------------------------------
+      # NETWORKING - subnet / IP
+      #   There is NO static-IP field in the VM spec. Addresses come from
+      #   the NAD's IPAM, external DHCP on the VLAN, or cloud-init.
+      # ----------------------------------------------------------------
+      networks:
+        - name: podnet
+          pod: {}
+        - name: vlan60
+          multus:
+            networkName: ${NAD_NAMESPACE}/${NAD_NAME}     # e.g. default/vlan-60
+
+      domain:
+        # ------------------------------------------------------------------
+        # EXPLICIT vCPU / RAM - mutually exclusive with `spec.instancetype`.
+        # The API rejects a VM that sets both:
+        #   "spec.template.spec.domain.cpu.sockets conflicts with selected
+        #    instance type"
+        # This manifest uses `instancetype`, so these are commented out.
+        # Uncomment them AND remove the `instancetype` block above to use the
+        # explicit form instead.
+        # ------------------------------------------------------------------
+        # cpu:
+        #   cores: 4
+        #   sockets: 1
+        #   threads: 1
+        #   maxSockets: 16     # enables CPU hot-plug up to 4x the boot value
+        # memory:
+        #   guest: 16Gi
+        #   maxGuest: 64Gi     # enables memory hot-plug (needs virtio-mem)
+
+        features:
+          acpi: {}
+
+        devices:
+          # ------------------------------------------------------------
+          # DISK ATTACHMENT - bus and boot order
+          # ------------------------------------------------------------
+          disks:
+            - name: root
+              disk:
+                bus: virtio                              # fastest
+              bootOrder: 1
+            - name: data01
+              disk:
+                bus: virtio
+            - name: data02
+              disk:
+                bus: virtio
+            - name: cloudinit
+              disk:
+                bus: virtio
+
+          # ------------------------------------------------------------
+          # NETWORK INTERFACES
+          # ------------------------------------------------------------
+          interfaces:
+            # Cluster pod network, NAT'd. Dynamic IP from the pod CIDR.
+            - name: podnet
+              masquerade: {}
+            # VLAN 60, bridging binding for L2 access.
+            # Static addressing is applied in-guest via cloud-init below.
+            - name: vlan60
+              bridge: {}
+              model: virtio
+              # macAddress: "02:00:00:00:00:60"          # omit to let kubemacpool assign
+
+          rng: {}
+          inputs:
+            - type: tablet
+              bus: virtio
+          autoattachPodInterface: false                   # networks[] is explicit
+          autoattachGraphicsDevice: true
+
+      # ----------------------------------------------------------------
+      # VOLUMES - wire the disks above to their sources
+      # ----------------------------------------------------------------
+      volumes:
+        - name: root
+          dataVolume:
+            name: rhel9-full-example-root
+        - name: data01
+          dataVolume:
+            name: rhel9-full-example-data01
+        - name: data02
+          dataVolume:
+            name: rhel9-full-example-data02
+        - name: cloudinit
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              hostname: rhel9-full-example
+              user: cloud-user
+              ssh_authorized_keys:
+                - ssh-ed25519 AAAA...replace-with-your-public-key user@host
+              # Static IP on the VLAN 60 interface.
+              # Confirm the interface name inside the guest first.
+              write_files:
+                - path: /etc/NetworkManager/system-connections/vlan60.nmconnection
+                  permissions: '0600'
+                  content: |
+                    [connection]
+                    id=vlan60
+                    type=ethernet
+                    interface-name=enp2s0
+                    [ipv4]
+                    method=manual
+                    addresses=192.0.2.50/24
+                    gateway=192.0.2.1
+                    dns=192.0.2.1;
+              runcmd:
+                - nmcli connection reload
+                - nmcli connection up vlan60
+
+      # ----------------------------------------------------------------
+      # EVICTION
+      #   LiveMigrate moves this VM on node drain/reboot.
+      #   Requires ReadWriteMany storage - otherwise use None.
+      # ----------------------------------------------------------------
+      evictionStrategy: LiveMigrate
+
+      terminationGracePeriodSeconds: 180

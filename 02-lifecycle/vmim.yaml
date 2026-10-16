@@ -1,0 +1,49 @@
+# VirtualMachineInstanceMigration - request a live migration.
+#
+# This is exactly what `virtctl migrate <vm>` creates for you.
+#
+#   envsubst < vmim.yaml | oc apply -f -
+#
+# Required env vars: NAMESPACE, VM_NAME
+#
+# TWO RUNTIME PRECONDITIONS the API enforces at admission time:
+#
+#  1. The VMI must exist. The webhook rejects a migration for a stopped VM:
+#       "migration-create-validator.kubevirt.io" denied the request:
+#       the VMI "<ns>/<vm>" does not exist
+#
+#  2. `spec.priority` requires the MigrationPriorityQueue feature gate.
+#     Without it:
+#       "migration-create-validator.kubevirt.io" denied the request:
+#       MigrationPriorityQueue feature gate is not enabled in kubevirt resource
+#     Check which gates are on:
+#       oc get kubevirt -n openshift-cnv \
+#         -o jsonpath='{.items[0].spec.configuration.developerConfiguration.featureGates}{"\n"}'
+---
+# Simple form: let the scheduler choose the target node.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstanceMigration
+metadata:
+  name: ${VM_NAME}-migrate
+  namespace: ${NAMESPACE}
+spec:
+  vmiName: ${VM_NAME}
+
+---
+# Pinned form: request a specific target node.
+#
+# `addedNodeSelector` may only RESTRICT the set of nodes allowed by the VM's
+# own nodeSelector/nodeAffinity - it can never widen it. On key collisions the
+# VM's value wins, which prevents a migration from bypassing placement rules.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstanceMigration
+metadata:
+  name: ${VM_NAME}-migrate-pinned
+  namespace: ${NAMESPACE}
+spec:
+  vmiName: ${VM_NAME}
+  addedNodeSelector:
+    kubernetes.io/hostname: ${TARGET_NODE}
+  # priority requires the MigrationPriorityQueue feature gate - leave it out
+  # unless you have confirmed the gate is enabled on your cluster.
+  # priority: user-triggered      # system-critical | user-triggered | system-maintenance

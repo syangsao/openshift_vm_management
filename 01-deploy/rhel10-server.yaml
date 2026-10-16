@@ -1,0 +1,97 @@
+# RHEL 10 VM.
+#
+# OCP 4.22 ships NO RHEL 10 templates - build the VM from the boot source plus
+# an instance type and preference instead. This is the modern, supported path.
+#
+#   envsubst < rhel10-server.yaml | oc apply -f -
+#
+# Required env vars: NAMESPACE, STORAGE_CLASS
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: rhel10-server
+  namespace: ${NAMESPACE}
+  labels:
+    app: rhel10-server
+spec:
+  runStrategy: Always
+
+  # OS disk cloned from the rhel10 boot source.
+  # rhel10 is refreshed automatically by a DataImportCron.
+  dataVolumeTemplates:
+    - metadata:
+        name: rhel10-server-root
+      spec:
+        sourceRef:
+          kind: DataSource
+          name: rhel10
+          namespace: openshift-virtualization-os-images
+        storage:
+          resources:
+            requests:
+              storage: 30Gi
+          storageClassName: ${STORAGE_CLASS}
+
+  # vCPU + RAM
+  instancetype:
+    kind: VirtualMachineClusterInstancetype
+    name: u1.large                                  # 2 vCPU / 8 GiB
+  # OS and version
+  preference:
+    kind: VirtualMachineClusterPreference
+    name: rhel.10
+
+  template:
+    metadata:
+      labels:
+        app: rhel10-server
+    spec:
+      domain:
+        devices:
+          disks:
+            - name: root
+              disk: {bus: virtio}
+              bootOrder: 1
+            - name: cloudinit
+              disk: {bus: virtio}
+          interfaces:
+            - name: podnet
+              masquerade: {}
+          rng: {}
+      networks:
+        - name: podnet
+          pod: {}
+      volumes:
+        - name: root
+          dataVolume:
+            name: rhel10-server-root
+        - name: cloudinit
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              user: cloud-user
+              ssh_authorized_keys:
+                - ssh-ed25519 AAAA...replace-with-your-public-key user@host
+      evictionStrategy: LiveMigrate
+
+---
+# RHEL 10 built directly from the DataSource without cloning:
+# the DataVolume is created separately and referenced as a plain PVC.
+# Useful when several VMs should share one imported image generation.
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: rhel10-shared-disk
+  namespace: ${NAMESPACE}
+spec:
+  sourceRef:
+    kind: DataSource
+    name: rhel10
+    namespace: openshift-virtualization-os-images
+  pvc:
+    accessModes: [ReadWriteMany]
+    resources:
+      requests:
+        storage: 30Gi
+    storageClassName: ${STORAGE_CLASS}
+    volumeMode: Block

@@ -1,0 +1,83 @@
+# VirtualMachineClone - copy a VM and its disks.
+#
+#   clone.kubevirt.io/v1beta1   (API tier 2)
+#
+# The controller creates a new VirtualMachine, clones each of its volumes, and
+# regenerates identity-bearing fields (MAC addresses, SMBIOS serial) so the copy
+# does not collide with the original on the network.
+#
+#   envsubst < vm-clone.yaml | oc apply -f -
+#
+# Required env vars: NAMESPACE
+---
+# Simplest form: clone source-vm to a new VM in the same namespace.
+apiVersion: clone.kubevirt.io/v1beta1
+kind: VirtualMachineClone
+metadata:
+  name: clone-of-source-vm
+  namespace: ${NAMESPACE}
+spec:
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: source-vm
+  target:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: target-vm
+
+---
+# Full form: control which labels/annotations carry over, which volumes are
+# cloned, and how identities are regenerated.
+apiVersion: clone.kubevirt.io/v1beta1
+kind: VirtualMachineClone
+metadata:
+  name: clone-of-source-vm-custom
+  namespace: ${NAMESPACE}
+spec:
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: source-vm
+  target:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: target-vm-custom
+
+  # Only clone these volumes. Omit to clone all of them.
+  # Volumes not cloned are dropped from the target VM's spec.
+  newVolumeNames:
+    - vol-0
+
+  # Label / annotation filters. "*" copies everything, "!pattern" excludes,
+  # a bare pattern includes only matches.
+  #   "!kubevirt.io/*"      drop kubevirt-internal annotations
+  #   "app", "tier"         copy only these
+  labelFilters:
+    - "!kubevirt.io/*"
+    - "*"
+  annotationFilters:
+    - "!kubevirt.io/*"
+    - "*"
+
+  # Override generated identities instead of letting the controller pick.
+  newMacAddresses:
+    net-0: "02:00:00:00:00:aa"
+  newSMBiosSerial: "CLONE-0001"
+
+  # Arbitrary JSON patches applied to the resulting target VM.
+  patches:
+    - '[{"op":"replace","path":"/spec/template/spec/domain/cpu/cores","value":4}]'
+
+---
+# Watching a clone
+#
+#   oc get vmclone -n <NAMESPACE>
+#   oc get vmclone clone-of-source-vm -n <NAMESPACE> -o jsonpath='{.status.phase}{"\n"}'
+#
+# Phases: SnapshotInProgress -> CreatingTargetVM -> CloneVolumesInProgress
+#         -> RestoreInProgress -> Succeeded | Failed
+#
+# The clone controller snapshots the source, creates the target VM, then
+# restores the snapshot into the target. A running source VM is snapshotted
+# consistently, so cloning while running is supported.

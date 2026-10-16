@@ -1,0 +1,149 @@
+# Windows Server 2025 VM.
+#
+# PREREQUISITE: the win2k25 boot source is a PLACEHOLDER on a stock cluster.
+# Its PVC does not exist until an administrator populates it, and the
+# DataSource reports `Ready=False / PVC not found`. Populate it first:
+#
+#   virtctl image-upload dv win2k25 -n openshift-virtualization-os-images \
+#     --size=30Gi --image-path=/path/to/windows-server-2025.iso \
+#     --uploadproxy-url="https://cdi-uploadproxy-<CLUSTER_DOMAIN>" --insecure
+#
+# Then:
+#   envsubst < windows2025-server.yaml | oc apply -f -
+#
+# Required env vars: NAMESPACE, STORAGE_CLASS
+---
+# autounattend.xml delivered to the guest via the sysprep volume.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: windows2025-autounattend
+  namespace: ${NAMESPACE}
+data:
+  autounattend.xml: |
+    <?xml version="1.0" encoding="utf-8"?>
+    <unattend xmlns="urn:schemas-microsoft-com:unattend">
+      <settings pass="specialize">
+        <component name="Microsoft-Windows-Shell-Setup"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral"
+                   versionScope="nonSxS">
+          <ComputerName>win2025-server</ComputerName>
+          <TimeZone>UTC</TimeZone>
+        </component>
+      </settings>
+    </unattend>
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: windows2025-server
+  namespace: ${NAMESPACE}
+  labels:
+    app: windows2025-server
+spec:
+  runStrategy: Always
+
+  dataVolumeTemplates:
+    # OS disk
+    - metadata:
+        name: win2025-server-root
+      spec:
+        sourceRef:
+          kind: DataSource
+          name: win2k25
+          namespace: openshift-virtualization-os-images
+        storage:
+          resources:
+            requests:
+              storage: 60Gi
+          # Windows disks benefit from a dedicated storage class with
+          # larger block size / no compression when using ODF or Ceph.
+          storageClassName: ${STORAGE_CLASS}
+    # Data disk
+    - metadata:
+        name: win2025-server-data
+      spec:
+        source:
+          blank: {}
+        storage:
+          resources:
+            requests:
+              storage: 100Gi
+          storageClassName: ${STORAGE_CLASS}
+          volumeMode: Block
+
+  # vCPU + RAM
+  instancetype:
+    kind: VirtualMachineClusterInstancetype
+    name: u1.xlarge                                  # 4 vCPU / 16 GiB
+  # OS and version
+  preference:
+    kind: VirtualMachineClusterPreference
+    name: windows.2k25
+
+  template:
+    metadata:
+      labels:
+        app: windows2025-server
+    spec:
+      domain:
+        # Windows Server 2025 requires UEFI. SecureBoot needs the SMM feature.
+        features:
+          acpi: {}
+          apic: {}
+          smm:
+            enabled: true                           # REQUIRED for UEFI + SecureBoot
+        firmware:
+          bootloader:
+            efi:
+              secureBoot: true
+          # Set explicitly on some platforms so the guest sees a stable UUID
+          serial: ""
+        machine:
+          type: pc-q35-rhel9.6.0
+        clock:
+          timezone: UTC                             # Windows dislikes localtime drift
+        devices:
+          disks:
+            - name: root
+              disk: {bus: virtio}
+              bootOrder: 1
+            - name: data
+              disk: {bus: virtio}
+              bootOrder: 3
+            # virtio-win drivers ISO - attach to install drivers on a
+            # blank Windows install. Safe to leave attached.
+            - name: virtio-drivers
+              cdrom: {bus: sata}
+              bootOrder: 2
+          interfaces:
+            - name: podnet
+              masquerade: {}
+              model: virtio
+          rng: {}
+          inputs:
+            # Only `tablet` is a valid input type - the API rejects anything else:
+            #   "Input device can have only tablet type."
+            - type: tablet
+              bus: usb
+      networks:
+        - name: podnet
+          pod: {}
+      volumes:
+        - name: root
+          dataVolume:
+            name: win2025-server-root
+        - name: data
+          dataVolume:
+            name: win2025-server-data
+        - name: virtio-drivers
+          containerDisk:
+            image: quay.io/kubevirt/virtio-container-disk
+        - name: sysprep
+          sysprep:
+            configMap:
+              name: windows2025-autounattend
+      evictionStrategy: LiveMigrate
+      terminationGracePeriodSeconds: 3600

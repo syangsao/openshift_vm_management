@@ -1,0 +1,113 @@
+# VirtualMachineBackup - incremental, checkpoint-based VM backup.
+#
+#   backup.kubevirt.io/v1alpha1   *** API TIER 4 - no compatibility guarantee ***
+#
+# REQUIRES A FEATURE GATE. The CRDs are installed by default but the admission
+# webhook rejects every object until `incrementalBackup` is enabled:
+#
+#   Error from server: admission webhook
+#   "virtualmachinebackup-validator.backup.kubevirt.io" denied the request:
+#   IncrementalBackup feature gate not enabled
+#
+# `incrementalBackup` is an ALPHA (developer preview) gate - it is NOT in the
+# default gate list. Enable it on the HyperConverged CR:
+#
+#   oc patch hyperconverged kubevirt-hyperconverged -n openshift-cnv --type merge \
+#     -p '{"spec":{"featureGates":[{"name":"incrementalBackup","state":true}]}}'
+#
+# Check the current gates:
+#
+#   oc get hyperconverged kubevirt-hyperconverged -n openshift-cnv \
+#     -o jsonpath='{.spec.featureGates}{"\n"}'
+#   oc get kubevirt -n openshift-cnv \
+#     -o jsonpath='{.items[0].spec.configuration.developerConfiguration.featureGates}{"\n"}'
+#
+# Treat this as experimental. Validate it against your storage backend before
+# relying on it. For stable backups use VirtualMachineSnapshot (tier 2).
+#
+# The tracker remembers the last pushed state so subsequent backups only carry
+# changed data. Requires the storage driver to support change-block-tracking.
+#
+#   envsubst < vm-backup.yaml | oc apply -f -
+#
+# Required env vars: NAMESPACE
+---
+# A tracker binds a backup "identity" to a VM. Create one per VM you back up.
+apiVersion: backup.kubevirt.io/v1alpha1
+kind: VirtualMachineBackupTracker
+metadata:
+  name: web-01-tracker
+  namespace: ${NAMESPACE}
+spec:
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: web-01
+
+---
+# Push mode: the backup writes into a PVC you supply.
+# The backup pod copies the changed blocks into pvcName.
+apiVersion: backup.kubevirt.io/v1alpha1
+kind: VirtualMachineBackup
+metadata:
+  name: web-01-backup-001
+  namespace: ${NAMESPACE}
+spec:
+  # Either reference the VM directly...
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: web-01
+  # ...or reference a tracker for incremental behaviour:
+  # source:
+  #   apiGroup: backup.kubevirt.io
+  #   kind: VirtualMachineBackupTracker
+  #   name: web-01-tracker
+
+  mode: Push
+  pvcName: web-01-backups          # required in push mode
+
+  # false -> incremental against the tracker's last checkpoint
+  # true  -> ignore checkpoints and send everything
+  forceFullBackup: false
+
+  # false -> quiesce the guest filesystem first (needs the QEMU guest agent)
+  #          for a crash-consistent-free, application-consistent backup
+  skipQuiesce: false
+
+  # Pull mode auto-deletes the backup (and its export) after this duration.
+  # Only meaningful with mode: Pull.
+  ttlDuration: 24h0m0s
+
+---
+# Pull mode: the backup is transferred out via an internal endpoint.
+# Use tokenSecretRef to authenticate the client that pulls the data.
+apiVersion: backup.kubevirt.io/v1alpha1
+kind: VirtualMachineBackup
+metadata:
+  name: web-01-backup-002-pull
+  namespace: ${NAMESPACE}
+spec:
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: web-01
+  mode: Pull
+  # pvcName is required by this version's validation in BOTH modes.
+  pvcName: web-01-backups
+  ttlDuration: 24h0m0s
+  tokenSecretRef: web-01-backup-token
+
+---
+# Prerequisites for push mode: the target PVC.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: web-01-backups
+  namespace: ${NAMESPACE}
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 200Gi
+  storageClassName: nfs-csi

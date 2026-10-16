@@ -1,0 +1,24 @@
+# Local overrides - never commit cluster-specific values
+.env
+*.local.yaml
+.cluster-vars
+
+# Extracted kubeconfig credentials
+*.crt
+*.key
+cacert.crt
+token_decode
+
+# Generated output
+out/
+*.img
+*.img.gz
+*.qcow2
+*.iso
+*.tar.gz
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,40 @@
+# Take a snapshot before deleting a VM so the disks remain recoverable.
+#
+#   envsubst < snapshot-before-delete.yaml | oc apply -f -
+#   # wait for Succeeded
+#   oc get vmsnapshot -n <NAMESPACE> -w
+#   # then delete the VM - the snapshot and its contents survive
+#   oc delete vm <VM_NAME> -n <NAMESPACE>
+#
+# Required env vars: NAMESPACE, VM_NAME, SNAPSHOT_NAME
+---
+apiVersion: snapshot.kubevirt.io/v1beta1
+kind: VirtualMachineSnapshot
+metadata:
+  name: ${SNAPSHOT_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  # Fail rather than silently skip disks that cannot be snapshotted.
+  failureDeadline: 10m
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: ${VM_NAME}
+  # Optional: snapshot only selected volumes and/or exclude cloud-init disks.
+  # The cloud-init disk is regenerated at boot and does not need preserving.
+  # exclude:
+  #   - vol-0
+---
+# Restore the deleted VM from the snapshot.
+# This recreates the VirtualMachine AND its disks.
+apiVersion: snapshot.kubevirt.io/v1beta1
+kind: VirtualMachineRestore
+metadata:
+  name: ${SNAPSHOT_NAME}-restore
+  namespace: ${NAMESPACE}
+spec:
+  target:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: ${VM_NAME}
+  virtualMachineSnapshotName: ${SNAPSHOT_NAME}
