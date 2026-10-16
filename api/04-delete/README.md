@@ -130,6 +130,15 @@ An administrator can remove the option cluster-wide through the `HyperConverged`
 CR (`spec.virtualization.virtualMachineOptions.disableDeleteProtection`). VMs
 that already have it set keep their protection.
 
+> **Validated finding (2026-10-16, luke cluster).** The delete-protection
+> annotation is **not enforced** on OCP 4.22 / CNV 4.22.12. Setting
+> `kubevirt.io/delete-protection: "true"` and then running
+> `oc delete vm <name>` succeeds — the VM is deleted despite the annotation.
+> The annotation is accepted by the API but no admission webhook or controller
+> appears to act on it. **Do not rely on this annotation as a safety mechanism.**
+> Use RBAC (restrict `delete` on `virtualmachines`) or a snapshot-first workflow
+> instead.
+
 ## Step 3 — stop the VM
 
 A running VM has a VMI; deleting the VM while running is allowed but the shutdown
@@ -165,6 +174,18 @@ oc wait --for=jsonpath='{.status.phase}'=Succeeded vmsnapshot/${VM}-predelete -n
 ```
 
 The snapshot survives the VM deletion and can recreate both the VM and its disks.
+
+> **Validated (2026-10-16, luke cluster).** A `VirtualMachineSnapshot` of a
+> halted VM with two PVC-backed volumes completed in ~3 minutes
+> (`Succeeded`, `ReadyToUse: true`). After deleting the VM, the snapshot
+> survived. A `VirtualMachineRestore` recreated the VM and **new** PVCs
+> (named `restore-<uid>-root`, `restore-<uid>-data1`) — the original PVCs were
+> untouched. The restored VM's `volumes[]` point at the new `restore-*` PVCs,
+> not the originals. The restore took ~5 minutes (PVC provisioning + data copy).
+>
+> **Note:** the `oc wait` shorthand for restores is
+> `virtualmachinerestore/<name>` (not `vmsrestore`, which is not a registered
+> short name on this cluster).
 
 ## Step 5 — preserve disks you want to keep
 
@@ -228,6 +249,24 @@ oc delete vm $VM -n $NS --cascade=orphan
 
 `--cascade=orphan` deletes the `VirtualMachine` and leaves the `DataVolume` and
 `PVC` behind. This is the single safest way to remove a VM without losing data.
+
+> **Validated (2026-10-16, luke cluster).** Both propagation paths tested on a
+> VM with two directly-referenced PVCs (no `dataVolumeTemplates`):
+>
+> - **`Orphan`** (`?propagationPolicy=Orphan`): VM deleted, both PVCs and DVs
+>   survived. The snapshot also survived.
+> - **`Background`** (default, `--cascade=background`): VM deleted, both PVCs
+>   survived — because the PVCs had **no** `ownerReference` back to the VM.
+>
+> The critical variable is **ownership**, not the propagation policy. If the PVC
+> has an `ownerReference` to the VM (as MTV/Forklift-imported disks do), a
+> Background delete garbage-collects the PVC. If the PVC is unowned, both
+> Orphan and Background leave it alive. Check ownership before deleting:
+>
+> ```bash
+> oc get pvc <pvc-name> -n $NS -o jsonpath='{.metadata.ownerReferences}{"\n"}'
+> # empty → safe; non-empty with kind=VirtualMachine → will be GC'd on Background delete
+> ```
 
 ### Cascading delete of the disks
 

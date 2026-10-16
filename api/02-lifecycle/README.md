@@ -89,6 +89,18 @@ oc patch vm $VM -n $NS --type merge -p '{"spec":{"runStrategy":"Halted"}}'
 `spec.running` only works when `runStrategy` is `Manual`. For VMs that already
 carry a `runStrategy`, the patch above is the reliable path.
 
+> **Validated finding (2026-10-16, luke cluster).** Even with `runStrategy: Manual`,
+> patching `spec.running` is rejected by admission on OCP 4.22 / KubeVirt v1:
+>
+> ```
+> The request is invalid: spec.running: Running and RunStrategy are mutually
+> exclusive. Note that Running is deprecated, please use RunStrategy instead
+> ```
+>
+> In practice, **`spec.running` is unusable on any VM that has a `runStrategy`
+> set** — including `Manual`. The only working power-operation path on 4.22 is
+> the `runStrategy` patch above or the `start`/`stop`/`restart` subresources.
+
 ### runStrategy vs running
 
 These are **mutually exclusive**. `spec.running` is ignored on a VM whose
@@ -107,9 +119,9 @@ These are **mutually exclusive**. `spec.running` is ignored on a VM whose
 oc patch vm $VM -n $NS --type merge -p '{"spec":{"runStrategy":"Halted"}}'
 
 # Make spec.running controllable, then start
+# NOTE: on OCP 4.22 this second patch is rejected — see "Validated finding" above.
 oc patch vm $VM -n $NS --type merge -p '{"spec":{"runStrategy":"Manual"}}'
-oc patch vm $VM -n $NS --type merge -p '{"spec":{"running":true}}'
-```
+oc patch vm $VM -n $NS --type merge -p '{"spec":{"running":true}}'  # rejected on 4.22
 
 ### Pause / unpause
 
@@ -182,6 +194,25 @@ oc get nodes
 `ReadWriteOnce` storage cannot live-migrate. Passthrough devices (GPU, SR-IOV VF)
 cannot either.
 
+> **Pod-network interface must use masquerade.** A VM whose pod-network interface
+> uses `bridge: {}` is **not** live-migratable. The `LiveMigratable` condition
+> reports:
+>
+> ```
+> False: cannot migrate VMI which does not use masquerade or a migratable
+> plugin to connect to the pod network
+> ```
+>
+> Switch to `masquerade: {}` in the interface spec and restart the VMI (delete
+> the VMI; the VM controller recreates it with the new interface):
+>
+> ```bash
+> oc patch vm $VM -n $NS --type merge \
+>   -p '{"spec":{"template":{"spec":{"domain":{"devices":{"interfaces":[{"name":"net-0","model":"virtio","masquerade":{}}]}}}}}}'
+> oc delete vmi $VM -n $NS
+> # the VM controller recreates the VMI with masquerade; LiveMigratable flips to True
+> ```
+
 ### Request a migration
 
 Scheduler chooses the target:
@@ -247,6 +278,13 @@ curl -s $CURL "$SERVER/apis/kubevirt.io/v1/namespaces/$NS/virtualmachineinstance
 
 Phases: `Pending` → `Scheduling` → `TargetReady` → `Running` → `Succeeded`
 (or `Failed` / `Canceled`).
+
+> **Validated (2026-10-16, luke cluster).** A pinned migration
+> (`addedNodeSelector: kubernetes.io/hostname: control02.syangsao.net`) on a
+> 2-core / 4 GiB CentOS Stream 9 VM completed in **~5 seconds** (Pending →
+> Succeeded). The `migrationState` on the VMI records `mode: PreCopy`,
+> `sourceNode`, `targetNode`, and `targetDirectMigrationNodePorts`. On a small
+> VM with little dirty memory, the entire pre-copy cycle is nearly instant.
 
 ### Cancel
 

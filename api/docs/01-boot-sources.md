@@ -139,6 +139,104 @@ spec:
 Supported `source` kinds: `http`, `s3`, `registry`, `pvc`, `snapshot`,
 `upload`, `blank`, `imageio`.
 
+## Cloning a boot source for a VM (validated on OCP 4.22 / CNV 4.22.12)
+
+The `DataVolume` is the unit of import. Two patterns:
+
+### From a `DataSource` in `openshift-virtualization-os-images`
+
+This is what the console does when you pick a boot source. The `dataVolumeTemplate`
+in the VM spec references the `DataSource` by name, and CDI clones it at creation time:
+
+```yaml
+# In the VirtualMachine spec
+spec:
+  dataVolumeTemplates:
+    - metadata:
+        name: root
+      spec:
+        source:
+          pvc:
+            name: centos-stream9-19948c490936   # the backing PVC of the DataSource
+            namespace: openshift-virtualization-os-images
+        pvc:
+          accessModes: [ReadWriteMany]
+          resources:
+            requests:
+              storage: 35Gi                      # MUST be >= source size
+          storageClassName: <STORAGE_CLASS>
+```
+
+### Standalone `DataVolume` (for manual / scripted imports)
+
+```yaml
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: my-vm-root
+  namespace: vms
+spec:
+  source:
+    pvc:
+      name: centos-stream9-19948c490936
+      namespace: openshift-virtualization-os-images
+  pvc:
+    accessModes: [ReadWriteMany]
+    resources:
+      requests:
+        storage: 35Gi
+    storageClassName: <STORAGE_CLASS>
+```
+
+```bash
+oc wait --for=jsonpath='{.status.phase}'=Succeeded dv/my-vm-root -n vms --timeout=15m
+```
+
+### Pitfalls (validated on OCP 4.22)
+
+**Target size must be >= source size.** CDI rejects the clone at admission if the
+target `storage` request is smaller than the source PVC:
+
+```
+CloneValidationFailed: target resources requests storage size is smaller
+than the source 10737418240 < 34144990004
+```
+
+Check the source size first:
+
+```bash
+oc get pvc centos-stream9-<hash> -n openshift-virtualization-os-images \
+  -o jsonpath='{.spec.resources.requests.storage}'
+```
+
+**The `DataVolume` spec is immutable.** Once created, you cannot patch the source.
+Delete and recreate:
+
+```bash
+oc delete dv my-vm-root -n vms --wait=false
+# fix the manifest, then
+oc apply -f my-dv.yaml
+```
+
+**Smart clone uses VolumeSnapshot under the hood.** When the storage class supports
+snapshots (CSI with a `VolumeSnapshotClass`), CDI takes a snapshot of the source PVC
+and restores it into the target. The DV phase sequence is:
+
+```
+Pending → SnapshotForSmartCloneInProgress → CloneFromSnapshotSourceInProgress → Succeeded
+```
+
+This is fast (snapshot is copy-on-write) but requires the `VolumeSnapshotClass` to be
+registered in the storage profile. On NFS-CSI this works out of the box.
+
+**HTTP sources can 404 silently.** If the URL is wrong, the DV enters a retry loop
+with `Unable to connect to http data source: expected status code 200, got 404`.
+The DV does not fail permanently — it keeps retrying. Check events:
+
+```bash
+oc get events -n vms --field-selector involvedObject.name=my-vm-root
+```
+
 ## DataSource vs DataVolume vs PVC
 
 | Object | Role |

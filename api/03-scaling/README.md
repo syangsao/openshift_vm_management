@@ -13,9 +13,9 @@ SERVER=$(oc whoami --show-server)
 
 | Component | Hot-plug? | Ceiling | Guest requirement |
 | --- | --- | --- | --- |
-| **vCPU** | ✅ | up to **4×** the boot value | none special |
-| **RAM** | ✅ | up to **4×** the boot value | `virtio-mem` driver |
-| **Disk** | ✅ add / remove | 255 hot-plugged | none special |
+| **vCPU** (`cores`) | ❌ on 4.22 | — | restart required |
+| **RAM** (`guest`) | ✅ | up to **4×** the boot value | `virtio-mem` driver |
+| **Disk** | ⚠️ addvolume rejected on 4.22 | — | JSON patch + restart |
 | **NIC** | ❌ | — | restart required |
 | **Instance type** | ❌ | — | restart required |
 
@@ -72,6 +72,19 @@ curl -s $CURL -X PATCH \
 Decrease by patching a smaller value. CPU hot-**un**plug is not supported by every
 guest; if the count does not drop, restart.
 
+> **Validated finding (2026-10-16, luke cluster, CentOS Stream 9).** Changing
+> `cpu.cores` on a running VM does **not** hot-plug on OCP 4.22 / KubeVirt v1.
+> The patch is accepted, the VMI keeps its original core count, and a
+> `RestartRequired` condition is raised:
+>
+> ```
+> RestartRequired: True — a non-live-updatable field was changed in the template spec
+> ```
+>
+> No live migration is triggered. A manual restart (stop → start) applies the
+> change. This differs from the documentation claim that vCPU hot-plug works up
+> to 4× the boot value; on this cluster configuration it requires a restart.
+
 > **Network queue caveat.** With `networkInterfaceMultiQueue` enabled, interfaces
 > that existed before a CPU hot-plug keep their original queue count. Only a
 > restart refreshes them. Interfaces hot-plugged *after* the CPU change pick up
@@ -112,6 +125,12 @@ Guest support for `virtio-mem`:
 Memory hot-**un**plug is more restricted than hot-plug — decreasing often needs a
 restart even when increasing does not.
 
+> **Validated (2026-10-16, luke cluster, CentOS Stream 9).** RAM hot-plug
+> **works**: patching `memory.guest` from 2 Gi → 4 Gi on a running VM updated
+> the VMI within one poll cycle (~5 s) with no restart and no
+> `RestartRequired` condition. The guest must have the `virtio-mem` driver
+> loaded (CentOS Stream 9 ships it by default).
+
 ---
 
 ## Disks
@@ -149,6 +168,35 @@ curl -s $CURL -X PUT \
   -d '{"name":"data1","disk":{"bus":"virtio"},"volumeSource":{"dataVolume":{"name":"web-01-data01"}}}'
 ```
 
+> **Validated finding (2026-10-16, luke cluster).** The `addvolume` subresource
+> is **rejected** on OCP 4.22 / KubeVirt v1 even with the `HotplugVolumes`
+> feature gate enabled. Every variant tried — `{"bus":"virtio"}`,
+> `{"bus":"sata"}`, with and without `diskDevice: {"type":"disk"}` — returns:
+>
+> ```
+> HTTP 422: admission webhook "virtualmachineinstances-update-validator.kubevirt.io"
+> denied the request: Hotplug configuration for [data1] requires diskDevice of
+> type 'disk' or 'lun' to be used.
+> ```
+>
+> The `v1.Disk` schema in the OpenAPI spec does not expose a `diskDevice` field,
+> so there is no way to satisfy the webhook. The same applies to `removevolume`:
+>
+> ```
+> HTTP 409: Unable to remove volume [data1] because it is not hotpluggable
+> ```
+>
+> **Working alternative:** add the volume to the VM template via JSON patch and
+> restart. The disk appears on the VMI after the restart (auto-generated with
+> `bus: sata` if no explicit disk entry is provided):
+>
+> ```bash
+> oc patch vm $VM -n $NS --type json -p '[
+>   {"op":"add","path":"/spec/template/spec/volumes/-",
+>    "value":{"name":"data1","persistentVolumeClaim":{"claimName":"testvm-data1"}}}
+> ]'
+> # restart the VM to apply
+> ```
 ### Hot-unplug
 
 Body is `v1.RemoveVolumeOptions`, which requires only `name`:
@@ -271,6 +319,21 @@ restart.
 > Masquerade also requires the pod network, so it cannot be used as a workaround.
 > A real second NIC needs **Multus** and a `NetworkAttachmentDefinition` (NAD),
 > as shown in the attach example below.
+>
+> **Validated (2026-10-16, luke cluster).** Both rejection paths confirmed:
+>
+> ```bash
+> # Second pod-network interface → rejected
+> The request is invalid: spec.template.spec.interfaces: more than one interface
+> is connected to a pod network in spec.template.spec.interfaces
+>
+> # Multus + masquerade (no NAD) → rejected for a different reason
+> The request is invalid: spec.template.spec.domain.devices.interfaces[1].name:
+> Masquerade interface only implemented with pod network
+> ```
+>
+> A second NIC requires a real `NetworkAttachmentDefinition` and a `bridge` or
+> `sr-iov` interface type (not masquerade).
 
 ### Attach
 
