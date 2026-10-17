@@ -91,6 +91,22 @@ for c in s.get('conditions',[]): print(' ', c['type'], c['status'], c.get('messa
 "
 ```
 
+> **Validated (2026-10-17, luke cluster, CNV 4.22.12).**
+>
+> - **Create + scale-up work.** A pool of 2 (centos-stream9 boot source,
+>   `u1.large`) provisioned both replicas in ~5 min — each replica gets its own
+>   per-index DataVolume (`pool-root-0`, `pool-root-1`) cloned from the
+>   `DataSource`. Scaling 2→3 added `test-pool-2` and it was ready in ~4 min.
+> - **Scale-down stalled.** After `oc scale --replicas=1`, the pool stayed at
+>   `CURRENT=3 READY=3` for 20+ minutes; no scale-down activity in the
+>   virt-controller logs. The VMs kept their `pool.kubevirt.io/finalizer` and
+>   ownerReference, but nothing removed them. Treat scale-in as unreliable on
+>   this build — verify with `oc get virtualmachinepool` before assuming it
+>   happened.
+> - **Template validation is strict.** A pool template with an unnamed input
+>   device (`inputs: [{type: tablet, bus: virtio}]`) is rejected at admission:
+>   `spec.virtualMachineTemplate.spec.template.spec.domain.devices.inputs[0].name:
+>   Required value`. Every entry in `inputs[]` needs a `name`.
 ---
 
 ## VirtualMachineClone
@@ -137,8 +153,23 @@ supported and consistent.
 >    duplicate snapshot controllers, and the fact that NFS-CSI snapshots are full
 >    volume copies capped at a 20-minute timeout — which large VM disks never
 >    finish. Note that a *snapshot test on a small PVC can pass* while cloning a
->    real VM disk still fails.
+    real VM disk still fails.
 
+> **Validated (2026-10-17, luke cluster, CNV 4.22.12).** Cloned a *running*
+> two-disk VM (35 Gi root + 5 Gi data, NFS-CSI) while it was Running:
+>
+> | Phase | Duration |
+> | --- | --- |
+> | `SnapshotInProgress` (source snapshot to readyToUse) | ~3 min |
+> | `RestoreInProgress` (target PVCs provisioned + data copied) | ~1.5 min |
+> | **Total** | **~4.5 min** |
+>
+> The target VM was created stopped, both volumes cloned into new
+> `restore-<uid>-*` PVCs, and the interface MAC was regenerated (source
+> `02:8c:67:8e:f7:41` → clone `02:8c:67:8e:f7:45`). The clone booted cleanly.
+> Note the 35 Gi root disk finished snapshot+copy well under the 20-minute NFS
+> deadline here because the volume was mostly sparse — the large-disk failure
+> mode above applies to densely written disks.
 
 ---
 
@@ -343,6 +374,32 @@ curl -s --cacert cacert.crt \
   -o disk.img
 ```
 
+> **Validated (2026-10-17, luke cluster, CNV 4.22.12) — two problems.**
+>
+> **1. Exporting a *running* VM stalls at `Pending`.** The export object
+> created its Service and then stopped: no exporter pod was ever scheduled and
+> the phase never left `Pending` (10+ minutes). The Ready condition read
+> `InUse / Virtual Machine … is running`. Exporting a **stopped** VM worked —
+> the exporter pod started, both PVCs were mounted as
+> `/export-volumes/<pvc>/disk.img`, and the export reached `Ready` in ~10 s.
+> On this build, stop the VM before exporting it.
+>
+> **2. The download endpoints return 401.** With the export `Ready`, every
+> attempt to fetch a volume or the manifest was rejected:
+>
+> - internal URLs (`status.links.internal`) via port-forward: `401` with the
+>   bearer token from `export-token-<name>`, with Basic auth, with no auth
+> - external URLs (`status.links.external`, via the `virt-exportproxy` route):
+>   `401` for manifests, `404` for volumes — with the token and with kube
+>   client certificates
+>
+> The export server presents a cert signed by `export.kubevirt.io@<ts>` (the
+> CA in `status.links.*.cert` / the `kubevirt-export-ca` configmap), and a
+> standard kubeconfig client cert does not chain to it, so mTLS fails. The
+> generated token was not accepted as bearer either. Net effect: on this build
+> the export pipeline runs (pod, mounts, links) but the disk image cannot be
+> retrieved with stock credentials. Verify `virtctl vmexport download` against
+> your own cluster before relying on exports for off-cluster migration.
 ---
 
 ## Backup (tier 4)

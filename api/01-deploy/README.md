@@ -335,6 +335,34 @@ oc get vm rhel9-app01 -n $NS \
   -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}'
 ```
 
+## Validated on OCP 4.22 / CNV 4.22.12 (luke cluster, 2026-10-17)
+
+Deployed a VM from the `centos-stream9` boot source using the
+`rhel9-full-example.yaml` pattern (`dataVolumeTemplates` + `sourceRef`,
+`instancetype: u1.large`, `preference: centos.stream9`, `nodeSelector`,
+preferred pod anti-affinity, masquerade pod network):
+
+- **Boot-source clone via `sourceRef` works.** The controller created the
+  DataVolume from the `DataSource`; on NFS-CSI the import ran as a smart clone
+  (`SnapshotForSmartCloneInProgress` → `CloneFromSnapshotSourceInProgress`)
+  and the VM reached Running in ~4 min for a 35 Gi disk.
+- **Instance type resolved correctly.** `status.instancetypeRef: u1.large`,
+  `status.preferenceRef: centos.stream9`; the VMI came up with 2 cores /
+  8 GiB as the type specifies.
+- **`nodeSelector` honored** — the VMI landed on the pinned node; the
+  preferred anti-affinity was accepted (one VM, nothing to spread against).
+- **Ownership:** both `dataVolumeTemplates` DVs are owned by the VM
+  (`ownerReference` → VirtualMachine), so deleting the VM garbage-collects
+  the DVs and their PVCs. See [`04-delete/`](../04-delete/).
+- **Multus not installed** on this cluster — the `vlan60` NAD leg of the full
+  example cannot be exercised without it (`networkattachmentdefinitions` CRD
+  absent). The masquerade pod-network leg works and is the one that keeps the
+  VM live-migratable (see [`02-lifecycle/`](../02-lifecycle/)).
+- **Boot-source readiness:** on a stock cluster `rhel9`, `rhel8`, `rhel10`,
+  `centos-stream9/10`, `fedora` are Ready; all Windows sources and `rhel7`
+  report `PVC not found` until an administrator populates them (see
+  [`docs/01-boot-sources.md`](../docs/01-boot-sources.md)).
+
 ## Clean up a failed deployment
 
 ```bash
