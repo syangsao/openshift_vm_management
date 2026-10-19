@@ -20,12 +20,12 @@ the whole trap:
 So read each module as a **pipeline**, not a flat object list. The four layers,
 outermost to innermost, are:
 
-```
-  0. Bare metal (BMC/Redfish: boot source, power)   ->  01-rhel
-  1. Guest OS (PXE/kickstart installs RHEL)          ->  01-rhel  (driven, not owned)
-  2. OpenShift (openshift-install / Machine API)     ->  02-cluster
-  3. CNV + node roles + ACM                           ->  02-cluster
-  4. Networking / storage / lifecycle / maintenance   ->  03..07
+```mermaid
+flowchart LR
+  L0["0 · Bare metal — BMC/Redfish: boot source, power<br/>(01-rhel)"] --> L1["1 · Guest OS — PXE/kickstart installs RHEL<br/>(01-rhel, driven not owned)"]
+  L1 --> L2["2 · OpenShift — openshift-install / Machine API<br/>(02-cluster)"]
+  L2 --> L3["3 · CNV + node roles + ACM<br/>(02-cluster)"]
+  L3 --> L4["4 · Networking / storage / lifecycle / maintenance<br/>(03–07)"]
 ```
 
 Terraform "owns" only the control-plane state (the CRs). Everything below a

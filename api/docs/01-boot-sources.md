@@ -4,10 +4,9 @@ On OpenShift Virtualization the equivalent of a marketplace image is a
 **boot source**: a `DataSource` in the `openshift-virtualization-os-images`
 namespace that points at a `PersistentVolumeClaim` holding a prepared disk image.
 
-```
-DataSource (openshift-virtualization-os-images/rhel9)
-      |
-      +-- spec.source.pvc.name --> PVC rhel9-<hash>   (created + refreshed by a DataImportCron)
+```mermaid
+graph LR
+  DS["DataSource<br/>openshift-virtualization-os-images/rhel9"] -->|spec.source.pvc.name| PVC["PVC rhel9-&lt;hash&gt;<br/>created + refreshed by a DataImportCron"]
 ```
 
 ## Inspect what you have
@@ -222,8 +221,12 @@ oc apply -f my-dv.yaml
 snapshots (CSI with a `VolumeSnapshotClass`), CDI takes a snapshot of the source PVC
 and restores it into the target. The DV phase sequence is:
 
-```
-Pending → SnapshotForSmartCloneInProgress → CloneFromSnapshotSourceInProgress → Succeeded
+```mermaid
+stateDiagram-v2
+  [*] --> Pending
+  Pending --> SnapshotForSmartCloneInProgress
+  SnapshotForSmartCloneInProgress --> CloneFromSnapshotSourceInProgress
+  CloneFromSnapshotSourceInProgress --> Succeeded
 ```
 
 This is fast (snapshot is copy-on-write) but requires the `VolumeSnapshotClass` to be

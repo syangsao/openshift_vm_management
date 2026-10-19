@@ -4,11 +4,11 @@ Take one node out of the cluster: move its VMs, drain it, tell the Machine API
 to scale it down, then decommission the BMC. **Order matters** and the module
 expresses that as a dependency chain:
 
-```
- migrate VMs (live)
-     → cordon + drain            (drain re-migrates anything left)
-     → delete Machine / BareMetalHost   (Machine API removes the node)
-     → BMC power off             (decommission hardware)
+```mermaid
+flowchart TD
+  M["Migrate VMs (live)"] --> D["Cordon + drain<br/>(drain re-migrates anything left)"]
+  D --> X["Delete Machine / BareMetalHost<br/>(Machine API removes the node)"]
+  X --> P["BMC power off<br/>(decommission hardware)"]
 ```
 
 ## Why all of this is `null_resource` + `local-exec`

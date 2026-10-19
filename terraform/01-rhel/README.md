@@ -3,11 +3,12 @@
 Provision a raw server to a running **RHEL 9**: point its next boot at the
 network (PXE), power it on, and wait until the OS is reachable.
 
-```
-  Redfish (BMC)  --boot: PXE-->  PXE/kickstack  --installs-->  RHEL 9
-     ^                                                    |
-     |  Terraform drives here                            |  Terraform waits here
-     +-----  wait for OS reachable (ssh answers, /etc/redhat-release=9)
+```mermaid
+flowchart LR
+  TF["Terraform (01-rhel)"] -->|"drives: boot to PXE, power on"| BMC["Redfish (BMC)"]
+  BMC -->|"boot: PXE"| PXE["PXE/kickstack"]
+  PXE -->|"installs"| RHEL["RHEL 9"]
+  RHEL -.->|"waits until OS reachable: ssh answers, /etc/redhat-release=9"| TF
 ```
 
 ## The boundary
